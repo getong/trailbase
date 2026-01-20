@@ -441,8 +441,8 @@ mod tests {
     .unwrap();
   }
 
-  // fn init_sqlite_function_runtime(conn: &rusqlite::Connection) -> functions::SqliteFunctionRuntime {
-  //   let runtime = functions::SqliteFunctionRuntime::new(
+  // fn init_sqlite_function_runtime(conn: &rusqlite::Connection) ->
+  // functions::SqliteFunctionRuntime {   let runtime = functions::SqliteFunctionRuntime::new(
   //     WASM_COMPONENT_PATH.into(),
   //     RuntimeOptions {
   //       ..Default::default()
