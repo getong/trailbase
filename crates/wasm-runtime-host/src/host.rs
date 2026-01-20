@@ -5,7 +5,7 @@ use std::sync::Arc;
 use trailbase_sqlite::{Params, Rows};
 use trailbase_wasi_keyvalue::WasiKeyValueCtx;
 use wasmtime::Result;
-use wasmtime::component::ResourceTable;
+use wasmtime::component::{FutureReader, ResourceTable, Val};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 use wasmtime_wasi_io::IoView;
@@ -152,7 +152,7 @@ impl WasiHttpView for State {
   }
 }
 
-impl self::trailbase::database::sqlite::Host for State {
+impl self::trailbase::database::sqlite::HostWithStore for State {
   // fn execute(
   //   &mut self,
   //   query: String,
@@ -327,6 +327,11 @@ impl self::trailbase::database::sqlite::Host for State {
     }
 
     return Ok(query_fn(&self.tx, query, params));
+  }
+
+  async fn test(&mut self) -> wasmtime::Result<FutureReader<String>> {
+    return Ok(FutureReader::new(store, producer));
+    // return FutureReader::from_val(self.shared, &Val::String("42".to_string()));
   }
 }
 

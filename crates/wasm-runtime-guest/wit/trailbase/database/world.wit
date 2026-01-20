@@ -34,6 +34,10 @@ interface sqlite {
   tx-execute: func(query: string, params: list<value>) -> result<u64, tx-error>;
   @since(version = 0.1.0)
   tx-query: func(query: string, params: list<value>) -> result<list<list<value>>, tx-error>;
+
+
+  @since(version = 0.1.0)
+  test: func() -> future<string>;
 }
 
 world interfaces {
