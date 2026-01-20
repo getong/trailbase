@@ -37,7 +37,7 @@ interface sqlite {
 
 
   @since(version = 0.1.0)
-  test: func() -> future<string>;
+  test: async func() -> string;
 }
 
 world interfaces {

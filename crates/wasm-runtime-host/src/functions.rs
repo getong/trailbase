@@ -11,7 +11,7 @@ use crate::RuntimeOptions;
 
 mod sync {
   use trailbase_wasi_keyvalue::WasiKeyValueCtx;
-  use wasmtime::component::ResourceTable;
+  use wasmtime::component::{Accessor, HasData, ResourceTable};
   use wasmtime::{Config, Result};
   use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
   use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
@@ -76,6 +76,16 @@ mod sync {
 
     fn table(&mut self) -> &mut ResourceTable {
       return &mut self.resource_table;
+    }
+  }
+
+  impl HasData for State {
+    type Data<'a> = &'a mut State;
+  }
+
+  impl self::trailbase::database::sqlite::HostWithStore for State {
+    async fn test<T>(accessor: &Accessor<T, Self>) -> wasmtime::Result<String> {
+      return Ok("".to_string());
     }
   }
 
@@ -178,10 +188,7 @@ impl SqliteFunctionRuntime {
       })?;
 
       // Host interfaces.
-      sync::trailbase::database::sqlite::add_to_linker::<_, HasSelf<sync::State>>(
-        &mut linker,
-        |s| s,
-      )?;
+      sync::trailbase::database::sqlite::add_to_linker::<_, sync::State>(&mut linker, |s| s)?;
 
       linker
     };
