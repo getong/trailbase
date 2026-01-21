@@ -21,7 +21,6 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi_http::bindings::http::types::ErrorCode;
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
-use functions::ABI_MISMATCH_WARNING;
 use host::exports::trailbase::component::init_endpoint::Arguments;
 use host::{SharedState, State};
 
@@ -61,7 +60,7 @@ pub struct Runtime {
 }
 
 impl Runtime {
-  pub fn spawn(
+  pub fn init(
     rt: Option<tokio::runtime::Handle>,
     wasm_source_file: PathBuf,
     conn: trailbase_sqlite::Connection,
@@ -208,6 +207,7 @@ pub struct InitResult {
   pub job_handlers: Vec<(String, String)>,
 }
 
+// NOTE: A better name may be Component.
 struct Context {
   engine: Engine,
   component: Component,
@@ -413,7 +413,7 @@ fn build_config(cache: Option<wasmtime::Cache>, use_winch: bool) -> Config {
   config.memory_reservation(64 * 1024 * 1024 /* bytes */);
   // NOTE: This is where we enable async execution. Ironically, this runtime setting requires
   // compile-time setting to make all guest-exported bindings async... *all*. With this enabled
-  // calling syncronous bindings will panic.
+  // calling synchronous bindings will panic.
   config.async_support(true);
   // config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
 
@@ -449,7 +449,15 @@ fn build_config(cache: Option<wasmtime::Cache>, use_winch: bool) -> Config {
 //     ))),
 //   );
 // }
+//
 
+const ABI_MISMATCH_WARNING: &str = "\
+    This may happen if the server and component are ABI incompatible. Make sure to run compatible \
+    versions, i.e. update/rebuild the component to match the server binary or update your server \
+    to run more up-to-date components.\n\
+    First-party components can be updated easily by running `$ trail components update` or downloaded from: \
+    https://github.com/trailbaseio/trailbase/releases.";
+//
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -461,8 +469,8 @@ mod tests {
 
   const WASM_COMPONENT_PATH: &str = "../../client/testfixture/wasm/wasm_guest_testfixture.wasm";
 
-  fn spawn_runtime(conn: trailbase_sqlite::Connection) -> Runtime {
-    return Runtime::spawn(
+  fn init_runtime(conn: trailbase_sqlite::Connection) -> Runtime {
+    return Runtime::init(
       None,
       WASM_COMPONENT_PATH.into(),
       conn.clone(),
@@ -474,18 +482,22 @@ mod tests {
     .unwrap();
   }
 
-  async fn init_sqlite_function_runtime(
-    conn: &rusqlite::Connection,
-  ) -> functions::SqliteFunctionRuntime {
-    let runtime = functions::SqliteFunctionRuntime::new(
-      WASM_COMPONENT_PATH.into(),
-      RuntimeOptions {
-        ..Default::default()
-      },
-    )
-    .unwrap();
+  async fn init_sqlite_function_runtime(conn: &rusqlite::Connection) -> Runtime {
+    // FIXME: We shouldn't pass a trailbase_sqlite::Connection into a runtime for sqlite
+    // functions.
+    let trailbase_conn = trailbase_sqlite::Connection::open_in_memory().unwrap();
+    let runtime = init_runtime(trailbase_conn);
+    // let runtime = functions::SqliteFunctionRuntime::new(
+    //   WASM_COMPONENT_PATH.into(),
+    //   RuntimeOptions {
+    //     ..Default::default()
+    //   },
+    // )
+    // .unwrap();
 
-    let foo = Arc::new(Mutex::new(functions::Foo::new(&runtime).await.unwrap()));
+    let foo = Arc::new(Mutex::new(
+      functions::Foo::new(&runtime.context).await.unwrap(),
+    ));
 
     let functions = foo
       .lock()
@@ -501,7 +513,7 @@ mod tests {
   #[tokio::test]
   async fn test_init() {
     let conn = trailbase_sqlite::Connection::open_in_memory().unwrap();
-    let runtime = spawn_runtime(conn.clone());
+    let runtime = init_runtime(conn.clone());
 
     runtime
       .initialize(InitArgs { version: None })
@@ -531,7 +543,7 @@ mod tests {
   #[tokio::test]
   async fn test_transaction() {
     let conn = trailbase_sqlite::Connection::open_in_memory().unwrap();
-    let runtime = Arc::new(spawn_runtime(conn.clone()));
+    let runtime = Arc::new(init_runtime(conn.clone()));
 
     let futures: Vec<_> = (0..256)
       .map(|_| {
@@ -558,7 +570,7 @@ mod tests {
     let _sqlite_function_runtime = init_sqlite_function_runtime(&conn).await;
 
     let conn = trailbase_sqlite::Connection::from_connection_test_only(conn);
-    let runtime = spawn_runtime(conn.clone());
+    let runtime = init_runtime(conn.clone());
 
     let response = send_http_request(&runtime, "http://localhost:4000/custom_fun", "/custom_fun")
       .await
