@@ -1,7 +1,9 @@
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::SystemTime;
 use trailbase_wasi_keyvalue::Store as KvStore;
 use trailbase_wasi_keyvalue::WasiKeyValueCtx;
-use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
+use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Engine, Result, Store};
 use wasmtime_wasi::WasiCtxBuilder;
 use wasmtime_wasi_http::WasiHttpCtx;
@@ -43,13 +45,15 @@ mod sync {
           default: trappable,
       },
       exports: {
-          default: trappable,
+        // "trailbase:component/init-endpoint.init-http-handlers": async,
+        // "trailbase:component/init-endpoint.init-job-handlers": async,
+        default: async,
       },
   });
 
   pub(super) fn build_config(cache: Option<wasmtime::Cache>, use_winch: bool) -> Config {
     let mut config = crate::build_config(cache, use_winch);
-    config.async_support(false);
+    config.async_support(true);
     return config;
   }
 
@@ -84,7 +88,7 @@ mod sync {
   }
 
   impl self::trailbase::database::sqlite::HostWithStore for State {
-    async fn test<T>(accessor: &Accessor<T, Self>) -> wasmtime::Result<String> {
+    async fn test<T>(_accessor: &Accessor<T, Self>) -> wasmtime::Result<String> {
       return Ok("".to_string());
     }
   }
@@ -230,11 +234,12 @@ impl SqliteFunctionRuntime {
     ));
   }
 
-  fn new_bindings(&self) -> Result<(Store<sync::State>, sync::Init), Error> {
+  async fn new_bindings(&self) -> Result<(Store<sync::State>, sync::Init), Error> {
     let mut store = self.new_store()?;
 
-    let bindings =
-      sync::Init::instantiate(&mut store, &self.component, &self.linker).map_err(|err| {
+    let bindings = sync::Init::instantiate_async(&mut store, &self.component, &self.linker)
+      .await
+      .map_err(|err| {
         log::error!(
           "Failed to instantiate WIT component {path:?}: '{err}'.\n{ABI_MISMATCH_WARNING}",
           path = self.component_path
@@ -246,12 +251,79 @@ impl SqliteFunctionRuntime {
   }
 
   // Call WASM components `init` implementation.
-  pub fn initialize_sqlite_functions(
-    &self,
+  // pub async fn initialize_sqlite_functions(
+  //   &self,
+  //   args: crate::InitArgs,
+  // ) -> Result<SqliteFunctions, Error> {
+  //   let (mut store, bindings) = self.new_bindings().await?;
+  //   let api = bindings.trailbase_component_init_endpoint();
+  //
+  //   let args = sync::exports::trailbase::component::init_endpoint::Arguments {
+  //     version: args.version,
+  //   };
+  //
+  //   return Ok(SqliteFunctions {
+  //     scalar_functions: api
+  //       .call_init_sqlite_functions(&mut store, &args)?
+  //       .scalar_functions
+  //       .into_iter()
+  //       .map(|f| {
+  //         return SqliteScalarFunction {
+  //           name: f.name,
+  //           num_args: f.num_args,
+  //           flags: f
+  //             .function_flags
+  //             .into_iter()
+  //             .map(|f| -> rusqlite::functions::FunctionFlags {
+  //               return rusqlite::functions::FunctionFlags::from_bits_truncate(f as i32);
+  //             })
+  //             .collect(),
+  //         };
+  //       })
+  //       .collect(),
+  //   });
+  // }
+  //
+  // pub async fn dispatch_scalar_function(
+  //   &self,
+  //   function_name: String,
+  //   args: Vec<Value>,
+  // ) -> Result<Value, Error> {
+  //   use sync::exports::trailbase::component::sqlite_function_endpoint::Arguments;
+  //
+  //   let (mut store, bindings) = self.new_bindings().await?;
+  //   let api = bindings.trailbase_component_sqlite_function_endpoint();
+  //
+  //   let args = Arguments {
+  //     function_name,
+  //     arguments: args,
+  //   };
+  //
+  //   return api
+  //     .call_dispatch_scalar_function(&mut store, &args)?
+  //     .map_err(|err| {
+  //       return Error::Other(err.to_string());
+  //     });
+  // }
+}
+
+pub struct Foo {
+  store: Store<sync::State>,
+  bindings: sync::Init,
+}
+
+impl Foo {
+  pub async fn new(runtime: &SqliteFunctionRuntime) -> Result<Self, Error> {
+    let (store, bindings) = runtime.new_bindings().await?;
+    return Ok(Self { store, bindings });
+  }
+
+  // Call WASM components `init` implementation.
+  pub async fn initialize_sqlite_functions(
+    &mut self,
     args: crate::InitArgs,
   ) -> Result<SqliteFunctions, Error> {
-    let (mut store, bindings) = self.new_bindings()?;
-    let api = bindings.trailbase_component_init_endpoint();
+    let api = self.bindings.trailbase_component_init_endpoint();
 
     let args = sync::exports::trailbase::component::init_endpoint::Arguments {
       version: args.version,
@@ -259,7 +331,8 @@ impl SqliteFunctionRuntime {
 
     return Ok(SqliteFunctions {
       scalar_functions: api
-        .call_init_sqlite_functions(&mut store, &args)?
+        .call_init_sqlite_functions(&mut self.store, &args)
+        .await?
         .scalar_functions
         .into_iter()
         .map(|f| {
@@ -279,15 +352,14 @@ impl SqliteFunctionRuntime {
     });
   }
 
-  pub fn dispatch_scalar_function(
-    &self,
+  pub async fn dispatch_scalar_function(
+    &mut self,
     function_name: String,
     args: Vec<Value>,
   ) -> Result<Value, Error> {
     use sync::exports::trailbase::component::sqlite_function_endpoint::Arguments;
 
-    let (mut store, bindings) = self.new_bindings()?;
-    let api = bindings.trailbase_component_sqlite_function_endpoint();
+    let api = self.bindings.trailbase_component_sqlite_function_endpoint();
 
     let args = Arguments {
       function_name,
@@ -295,7 +367,8 @@ impl SqliteFunctionRuntime {
     };
 
     return api
-      .call_dispatch_scalar_function(&mut store, &args)?
+      .call_dispatch_scalar_function(&mut self.store, &args)
+      .await?
       .map_err(|err| {
         return Error::Other(err.to_string());
       });
@@ -304,7 +377,7 @@ impl SqliteFunctionRuntime {
 
 pub fn setup_connection(
   conn: &rusqlite::Connection,
-  runtime: &SqliteFunctionRuntime,
+  runtime: Arc<Mutex<Foo>>,
   functions: &SqliteFunctions,
 ) -> Result<(), rusqlite::Error> {
   for function in &functions.scalar_functions {
@@ -343,8 +416,16 @@ pub fn setup_connection(
 
         // This is where the actual dispatch happens in a stateless manner, i.e. subsequent
         // executions don't share state.
-        let value = rt
-          .dispatch_scalar_function(function_name.clone(), args)
+        let tokio = tokio::runtime::Builder::new_current_thread()
+          .enable_time()
+          .build()
+          .expect("success");
+
+        let value = tokio
+          .block_on(
+            rt.lock()
+              .dispatch_scalar_function(function_name.clone(), args),
+          )
           .map_err(|err| {
             return rusqlite::Error::UserFunctionError(err.into());
           })?;
@@ -387,11 +468,14 @@ mod tests {
     )
     .unwrap();
 
-    let (mut store, bindings) = runtime.new_bindings().unwrap();
+    let (mut store, bindings) = runtime.new_bindings().await.unwrap();
     let api = bindings.trailbase_component_init_endpoint();
 
     let args = Arguments { version: None };
 
-    api.call_init_http_handlers(&mut store, &args).unwrap();
+    api
+      .call_init_http_handlers(&mut store, &args)
+      .await
+      .unwrap();
   }
 }
