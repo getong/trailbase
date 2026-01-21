@@ -40,17 +40,10 @@ wasmtime::component::bindgen!({
     // to return traps from generated functions.
     imports: {
         "trailbase:database/sqlite.tx-begin": async,
-        // "trailbase:database/sqlite.tx-commit": trappable,
-        // "trailbase:database/sqlite.tx-rollback": trappable,
-        // "trailbase:database/sqlite.tx-execute": trappable,
-        // "trailbase:database/sqlite.tx-query": trappable,
         "trailbase:database/sqlite.test": async,
-
-        // default: async | trappable,
     },
     exports: {
-        "trailbase:component/init-endpoint.init-http-handlers": async,
-        "trailbase:component/init-endpoint.init-job-handlers": async,
+        default: async,
     },
 });
 

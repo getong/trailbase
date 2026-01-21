@@ -149,7 +149,10 @@ impl Runtime {
   pub async fn initialize(&self, args: InitArgs) -> Result<InitResult, Error> {
     let context = self.context.clone();
     return self
-      .call(async move { context.initialize(args).await })
+      .call(async move {
+        let mut foo = Foo::new(&context).await?;
+        foo.initialize(args).await
+      })
       .await?;
   }
 
@@ -161,7 +164,10 @@ impl Runtime {
   ) -> Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, Error> {
     let context = self.context.clone();
     return self
-      .call(async move { context.call_incoming_http_handler(request).await })
+      .call(async move {
+        let mut foo = Foo::new(&context).await?;
+        foo.call_incoming_http_handler(request).await
+      })
       .await?;
   }
 
@@ -258,50 +264,66 @@ impl Context {
 
     return Ok((store, bindings));
   }
+}
 
-  async fn initialize(&self, args: InitArgs) -> Result<InitResult, Error> {
-    let (mut store, bindings) = self.new_bindings().await?;
-    let api = bindings.trailbase_component_init_endpoint();
+struct Foo {
+  store: Arc<Mutex<Store<State>>>,
+  bindings: crate::host::Interfaces,
+
+  component: Component,
+  linker: Linker<State>,
+}
+
+impl Foo {
+  async fn new(ctx: &Context) -> Result<Self, Error> {
+    let (store, bindings) = ctx.new_bindings().await?;
+
+    return Ok(Self {
+      store: Arc::new(Mutex::new(store)),
+      bindings,
+      component: ctx.component.clone(),
+      linker: ctx.linker.clone(),
+    });
+  }
+
+  async fn initialize(&mut self, args: InitArgs) -> Result<InitResult, Error> {
+    let api = self.bindings.trailbase_component_init_endpoint();
 
     let args = Arguments {
       version: args.version,
     };
 
+    let mut lock = self.store.lock();
+
     return Ok(InitResult {
       http_handlers: api
-        .call_init_http_handlers(&mut store, &args)
+        .call_init_http_handlers(&mut *lock, &args)
         .await?
         .handlers,
       job_handlers: api
-        .call_init_job_handlers(&mut store, &args)
+        .call_init_job_handlers(&mut *lock, &args)
         .await?
         .handlers,
     });
   }
 
   async fn call_incoming_http_handler(
-    &self,
+    &mut self,
     request: hyper::Request<UnsyncBoxBody<Bytes, hyper::Error>>,
   ) -> Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, Error> {
-    let mut store = self.new_store()?;
-
-    let proxy = wasmtime_wasi_http::bindings::Proxy::instantiate_async(
-      &mut store,
-      &self.component,
-      &self.linker,
-    )
-    .await?;
-
-    let req = store.data_mut().new_incoming_request(
-      wasmtime_wasi_http::bindings::http::types::Scheme::Http,
-      request,
-    )?;
+    let proxy = {
+      let mut lock = self.store.lock();
+      wasmtime_wasi_http::bindings::Proxy::instantiate_async(
+        &mut *lock,
+        &self.component,
+        &self.linker,
+      )
+      .await?
+    };
 
     let (sender, receiver) = tokio::sync::oneshot::channel::<
       Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, ErrorCode>,
     >();
-
-    let out = store.data_mut().new_response_outparam(sender)?;
 
     // NOTE: wstd streams out responses in chunks of 2kB. Only once everything has been streamed,
     // `call_handle` will complete. This is also when the streaming response body completes.
@@ -314,10 +336,20 @@ impl Context {
     // In the current setup, if the listening side hangs-up the they call may not be aborted.
     // Depends on what the implementation does when the streaming body's receiving end gets
     // out of scope.
+    let store = self.store.clone();
     let handle = tokio::spawn(async move {
+      let mut lock = store.lock();
+
+      let req = lock.data_mut().new_incoming_request(
+        wasmtime_wasi_http::bindings::http::types::Scheme::Http,
+        request,
+      )?;
+
+      let out = lock.data_mut().new_response_outparam(sender)?;
+
       proxy
         .wasi_http_incoming_handler()
-        .call_handle(&mut store, req, out)
+        .call_handle(&mut *lock, req, out)
         .await
     });
 
