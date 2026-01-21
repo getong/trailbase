@@ -23,9 +23,9 @@ use wasmtime_wasi_http::bindings::http::types::ErrorCode;
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
 use host::exports::trailbase::component::init_endpoint::Arguments;
-use host::{SharedState, State};
 
 pub use host::exports::trailbase::component::init_endpoint::HttpMethodType;
+pub use host::{SharedState, State};
 pub use trailbase_wasi_keyvalue::Store as KvStore;
 
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
@@ -60,10 +60,6 @@ pub trait StoreBuilder<S> {
   fn new_store(&self, engine: &Engine) -> Result<Store<S>, Error>;
 }
 
-pub struct Runtime<T: StoreBuilder<State>> {
-  state: Arc<RuntimeInternal<T>>,
-}
-
 // NOTE: A better name may be Component.
 struct RuntimeInternal<T: StoreBuilder<State>> {
   engine: Engine,
@@ -79,7 +75,14 @@ struct RuntimeInternal<T: StoreBuilder<State>> {
   local_in_flight: AtomicUsize,
 }
 
-impl<T: StoreBuilder<State>> Runtime<T> {
+#[derive(Clone)]
+pub struct RuntimeT<T: StoreBuilder<State>> {
+  state: Arc<RuntimeInternal<T>>,
+}
+
+pub type Runtime = RuntimeT<Arc<SharedState>>;
+
+impl<T: StoreBuilder<State>> RuntimeT<T> {
   pub fn init(
     wasm_source_file: PathBuf,
     store_builder: T,
@@ -215,7 +218,7 @@ impl StoreBuilder<State> for Arc<SharedState> {
     }
 
     return Ok(Store::new(
-      &engine,
+      engine,
       State {
         resource_table: ResourceTable::new(),
         wasi_ctx: wasi_ctx.build(),
@@ -236,12 +239,13 @@ struct HttpStoreInternal {
   runtime_state: Arc<RuntimeInternal<Arc<SharedState>>>,
 }
 
+#[derive(Clone)]
 pub struct HttpStore {
   state: Arc<HttpStoreInternal>,
 }
 
 impl HttpStore {
-  pub async fn new(rt: &Runtime<Arc<SharedState>>) -> Result<Self, Error> {
+  pub async fn new(rt: &Runtime) -> Result<Self, Error> {
     let (mut store, bindings) = rt.new_bindings().await?;
 
     let proxy_bindings = wasmtime_wasi_http::bindings::Proxy::instantiate_async(
@@ -261,7 +265,7 @@ impl HttpStore {
     });
   }
 
-  pub async fn initialize(&mut self, args: InitArgs) -> Result<InitResult, Error> {
+  pub async fn initialize(&self, args: InitArgs) -> Result<InitResult, Error> {
     let state = self.state.clone();
 
     return Self::call(&self.state.runtime_state, async move {
@@ -285,73 +289,71 @@ impl HttpStore {
       })
     })
     .await
-    .unwrap();
+    .expect("FIXME");
   }
 
   pub async fn call_incoming_http_handler(
-    &mut self,
+    &self,
     request: hyper::Request<UnsyncBoxBody<Bytes, hyper::Error>>,
   ) -> Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, Error> {
     let state = self.state.clone();
 
-    return Ok(
-      Self::call(&self.state.runtime_state, async move {
-        let (sender, receiver) = tokio::sync::oneshot::channel::<
-          Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, ErrorCode>,
-        >();
+    return Self::call(&self.state.runtime_state, async move {
+      let (sender, receiver) = tokio::sync::oneshot::channel::<
+        Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, ErrorCode>,
+      >();
 
-        // NOTE: wstd streams out responses in chunks of 2kB. Only once everything has been streamed,
-        // `call_handle` will complete. This is also when the streaming response body completes.
-        //
-        // We cannot use `wasmtime_wasi::runtime::spawn` here, which aborts the call when the handle
-        // gets dropped, since we're not awaiting the response stream here. We'd either have to consume
-        // the entire response here, keep the handle alive or as we currently do use a non-aborting
-        // spawn.
-        //
-        // In the current setup, if the listening side hangs-up the they call may not be aborted.
-        // Depends on what the implementation does when the streaming body's receiving end gets
-        // out of scope.
-        let handle = tokio::spawn(async move {
-          let mut lock = state.store.lock().await;
+      // NOTE: wstd streams out responses in chunks of 2kB. Only once everything has been streamed,
+      // `call_handle` will complete. This is also when the streaming response body completes.
+      //
+      // We cannot use `wasmtime_wasi::runtime::spawn` here, which aborts the call when the handle
+      // gets dropped, since we're not awaiting the response stream here. We'd either have to consume
+      // the entire response here, keep the handle alive or as we currently do use a non-aborting
+      // spawn.
+      //
+      // In the current setup, if the listening side hangs-up the they call may not be aborted.
+      // Depends on what the implementation does when the streaming body's receiving end gets
+      // out of scope.
+      let handle = tokio::spawn(async move {
+        let mut lock = state.store.lock().await;
 
-          let req = lock.data_mut().new_incoming_request(
-            wasmtime_wasi_http::bindings::http::types::Scheme::Http,
-            request,
-          )?;
+        let req = lock.data_mut().new_incoming_request(
+          wasmtime_wasi_http::bindings::http::types::Scheme::Http,
+          request,
+        )?;
 
-          let out = lock.data_mut().new_response_outparam(sender)?;
+        let out = lock.data_mut().new_response_outparam(sender)?;
 
-          state
-            .proxy_bindings
-            .wasi_http_incoming_handler()
-            .call_handle(lock.as_context_mut(), req, out)
-            .await
-        });
+        state
+          .proxy_bindings
+          .wasi_http_incoming_handler()
+          .call_handle(lock.as_context_mut(), req, out)
+          .await
+      });
 
-        match receiver.await {
-          Ok(Ok(resp)) => {
-            // NOTE: We cannot await the completion `call_handle` here with `handle.await?;`, since
-            // we're not consuming the response body, see above.
-            Ok(resp)
-          }
-          Ok(Err(err)) => {
-            handle
-              .await
-              .map_err(|err| Error::Other(err.to_string()))??;
-            Err(Error::HttpErrorCode(err))
-          }
-          Err(_) => {
-            log::debug!("channel closed");
-            handle
-              .await
-              .map_err(|err| Error::Other(err.to_string()))??;
-            Err(Error::ChannelClosed)
-          }
+      match receiver.await {
+        Ok(Ok(resp)) => {
+          // NOTE: We cannot await the completion `call_handle` here with `handle.await?;`, since
+          // we're not consuming the response body, see above.
+          Ok(resp)
         }
-      })
-      .await
-      .unwrap()?,
-    );
+        Ok(Err(err)) => {
+          handle
+            .await
+            .map_err(|err| Error::Other(err.to_string()))??;
+          Err(Error::HttpErrorCode(err))
+        }
+        Err(_) => {
+          log::debug!("channel closed");
+          handle
+            .await
+            .map_err(|err| Error::Other(err.to_string()))??;
+          Err(Error::ChannelClosed)
+        }
+      }
+    })
+    .await
+    .expect("FIXME");
   }
 
   fn call<F>(
@@ -481,7 +483,7 @@ mod tests {
 
   const WASM_COMPONENT_PATH: &str = "../../client/testfixture/wasm/wasm_guest_testfixture.wasm";
 
-  fn init_runtime(conn: Option<trailbase_sqlite::Connection>) -> Runtime<Arc<SharedState>> {
+  fn init_runtime(conn: Option<trailbase_sqlite::Connection>) -> Runtime {
     let shared_state = Arc::new(SharedState {
       conn,
       kv_store: KvStore::new(),
@@ -498,7 +500,7 @@ mod tests {
     .unwrap();
   }
 
-  async fn init_sqlite_function_runtime(conn: &rusqlite::Connection) -> Runtime<Arc<SharedState>> {
+  async fn init_sqlite_function_runtime(conn: &rusqlite::Connection) -> Runtime {
     let runtime = init_runtime(None);
 
     let foo = Arc::new(Mutex::new(
@@ -587,7 +589,7 @@ mod tests {
   }
 
   async fn send_http_request(
-    runtime: &Runtime<Arc<SharedState>>,
+    runtime: &Runtime,
     uri: &str,
     registered_path: &str,
   ) -> Result<Response<UnsyncBoxBody<Bytes, ErrorCode>>, Error> {

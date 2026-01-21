@@ -2,14 +2,16 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use wasmtime::{Result, Store};
 
-use crate::{Error, host::SharedState};
+use crate::Error;
 
+#[derive(Clone)]
 pub struct SqliteScalarFunction {
   pub name: String,
   pub num_args: u32,
   pub flags: Vec<rusqlite::functions::FunctionFlags>,
 }
 
+#[derive(Clone)]
 pub struct SqliteFunctions {
   pub scalar_functions: Vec<SqliteScalarFunction>,
 }
@@ -20,7 +22,7 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-  pub async fn new(runtime: &crate::Runtime<Arc<SharedState>>) -> Result<Self, Error> {
+  pub async fn new(runtime: &crate::Runtime) -> Result<Self, Error> {
     let (store, bindings) = runtime.new_bindings().await?;
     return Ok(Self { store, bindings });
   }
