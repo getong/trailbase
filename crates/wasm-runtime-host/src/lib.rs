@@ -9,14 +9,15 @@ mod sqlite;
 use bytes::Bytes;
 use core::future::Future;
 use http_body_util::combinators::UnsyncBoxBody;
-use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
+use tokio::sync::Mutex;
+use tokio::task::JoinError;
 use trailbase_wasi_keyvalue::WasiKeyValueCtx;
 use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{AsContext, AsContextMut, Config, Engine, Result, Store};
+use wasmtime::{AsContextMut, Config, Engine, Result, Store};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi_http::bindings::http::types::ErrorCode;
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
@@ -155,48 +156,6 @@ impl<T: StoreBuilder<State>> Runtime<T> {
     return &self.state.component_path;
   }
 
-  /// Call WASM component's `init` implementation.
-  pub async fn initialize(&self, args: InitArgs) -> Result<InitResult, Error> {
-    let mut foo = HttpStore::new(&self).await?;
-    return self.call(async move { foo.initialize(args).await }).await?;
-  }
-
-  /// Call http handlers exported by WASM component ("incoming" from the perspective of the
-  /// component).
-  pub async fn call_incoming_http_handler(
-    &self,
-    request: hyper::Request<UnsyncBoxBody<Bytes, hyper::Error>>,
-  ) -> Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, Error> {
-    let mut foo = HttpStore::new(&self).await?;
-    return self
-      .call(async move { foo.call_incoming_http_handler(request).await })
-      .await?;
-  }
-
-  async fn call<F>(&self, f: F) -> Result<F::Output, Error>
-  where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-  {
-    #[cfg(debug_assertions)]
-    log::debug!(
-      "WASM runtime ({path:?}) waiting for new messages. In flight: {}, {}",
-      self.state.local_in_flight.load(Ordering::Relaxed),
-      IN_FLIGHT.load(Ordering::Relaxed),
-      path = self.state.component_path,
-    );
-
-    self.state.local_in_flight.fetch_add(1, Ordering::Relaxed);
-    IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
-
-    let result = self.state.rt_handle.spawn(f).await;
-
-    IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
-    self.state.local_in_flight.fetch_sub(1, Ordering::Relaxed);
-
-    return result.map_err(|_err| Error::ChannelClosed);
-  }
-
   async fn new_bindings(&self) -> Result<(Store<State>, crate::host::Interfaces), Error> {
     let mut store = self.state.store_builder.new_store(&self.state.engine)?;
 
@@ -263,165 +222,167 @@ impl StoreBuilder<State> for Arc<SharedState> {
         http: WasiHttpCtx::new(),
         kv: WasiKeyValueCtx::new(self.kv_store.clone()),
         shared: self.clone(),
-        tx: Arc::new(Mutex::new(None)),
+        tx: Arc::new(parking_lot::Mutex::new(None)),
       },
     ));
   }
 }
 
-impl<T: StoreBuilder<State>> RuntimeInternal<T> {
-  // fn new_store(&self) -> Result<Store<State>, Error> {
-  //   let mut wasi_ctx = WasiCtxBuilder::new();
-  //   wasi_ctx.inherit_stdio();
-  //   wasi_ctx.stdin(wasmtime_wasi::p2::pipe::ClosedInputStream);
-  //   // wasi_ctx.stdout(wasmtime_wasi::p2::Stdout);
-  //   // wasi_ctx.stderr(wasmtime_wasi::p2::Stderr);
-  //
-  //   wasi_ctx.args(&[""]);
-  //   wasi_ctx.allow_tcp(false);
-  //   wasi_ctx.allow_udp(false);
-  //   wasi_ctx.allow_ip_name_lookup(true);
-  //
-  //   if let Some(ref path) = self.shared.fs_root_path {
-  //     wasi_ctx
-  //       .preopened_dir(path, "/", DirPerms::READ, FilePerms::READ)
-  //       .map_err(|err| Error::Other(err.to_string()))?;
-  //   }
-  //
-  //   return Ok(Store::new(
-  //     &self.engine,
-  //     State {
-  //       resource_table: ResourceTable::new(),
-  //       wasi_ctx: wasi_ctx.build(),
-  //       http: WasiHttpCtx::new(),
-  //       kv: WasiKeyValueCtx::new(self.shared.kv_store.clone()),
-  //       shared: self.shared.clone(),
-  //       tx: Arc::new(Mutex::new(None)),
-  //     },
-  //   ));
-  // }
+struct HttpStoreInternal {
+  store: Mutex<Store<State>>,
+  bindings: crate::host::Interfaces,
+  proxy_bindings: wasmtime_wasi_http::bindings::Proxy,
 
-  // async fn new_bindings(&self) -> Result<(Store<State>, crate::host::Interfaces), Error> {
-  //   let mut store = self.new_store()?;
-  //
-  //   let bindings =
-  //     crate::host::Interfaces::instantiate_async(&mut store, &self.component, &self.linker)
-  //       .await
-  //       .map_err(|err| {
-  //         log::error!(
-  //           "Failed to instantiate WIT component {path:?}: '{err}'.\n{ABI_MISMATCH_WARNING}",
-  //           path = self.component_path
-  //         );
-  //         return err;
-  //       })?;
-  //
-  //   return Ok((store, bindings));
-  // }
+  runtime_state: Arc<RuntimeInternal<Arc<SharedState>>>,
 }
 
-struct HttpStore {
-  store: Arc<Mutex<Store<State>>>,
-  bindings: crate::host::Interfaces,
-  proxy_bindings: Arc<wasmtime_wasi_http::bindings::Proxy>,
+pub struct HttpStore {
+  state: Arc<HttpStoreInternal>,
 }
 
 impl HttpStore {
-  async fn new<T: StoreBuilder<State>>(ctx: &Runtime<T>) -> Result<Self, Error> {
-    let (mut store, bindings) = ctx.new_bindings().await?;
+  pub async fn new(rt: &Runtime<Arc<SharedState>>) -> Result<Self, Error> {
+    let (mut store, bindings) = rt.new_bindings().await?;
 
-    let proxy_bindings = Arc::new(
-      wasmtime_wasi_http::bindings::Proxy::instantiate_async(
-        &mut store,
-        &ctx.state.component,
-        &ctx.state.linker,
-      )
-      .await?,
-    );
+    let proxy_bindings = wasmtime_wasi_http::bindings::Proxy::instantiate_async(
+      &mut store,
+      &rt.state.component,
+      &rt.state.linker,
+    )
+    .await?;
 
     return Ok(Self {
-      store: Arc::new(Mutex::new(store)),
-      bindings,
-      proxy_bindings,
+      state: Arc::new(HttpStoreInternal {
+        store: Mutex::new(store),
+        bindings,
+        proxy_bindings,
+        runtime_state: rt.state.clone(),
+      }),
     });
   }
 
-  async fn initialize(&mut self, args: InitArgs) -> Result<InitResult, Error> {
-    let api = self.bindings.trailbase_component_init_endpoint();
+  pub async fn initialize(&mut self, args: InitArgs) -> Result<InitResult, Error> {
+    let state = self.state.clone();
 
-    let args = Arguments {
-      version: args.version,
-    };
+    return Self::call(&self.state.runtime_state, async move {
+      let api = state.bindings.trailbase_component_init_endpoint();
 
-    let mut lock = self.store.lock();
+      let args = Arguments {
+        version: args.version,
+      };
 
-    return Ok(InitResult {
-      http_handlers: api
-        .call_init_http_handlers(&mut *lock, &args)
-        .await?
-        .handlers,
-      job_handlers: api
-        .call_init_job_handlers(&mut *lock, &args)
-        .await?
-        .handlers,
-    });
+      let mut lock = state.store.lock().await;
+
+      Ok(InitResult {
+        http_handlers: api
+          .call_init_http_handlers(&mut *lock, &args)
+          .await?
+          .handlers,
+        job_handlers: api
+          .call_init_job_handlers(&mut *lock, &args)
+          .await?
+          .handlers,
+      })
+    })
+    .await
+    .unwrap();
   }
 
-  async fn call_incoming_http_handler(
+  pub async fn call_incoming_http_handler(
     &mut self,
     request: hyper::Request<UnsyncBoxBody<Bytes, hyper::Error>>,
   ) -> Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, Error> {
-    let (sender, receiver) = tokio::sync::oneshot::channel::<
-      Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, ErrorCode>,
-    >();
+    let state = self.state.clone();
 
-    // NOTE: wstd streams out responses in chunks of 2kB. Only once everything has been streamed,
-    // `call_handle` will complete. This is also when the streaming response body completes.
-    //
-    // We cannot use `wasmtime_wasi::runtime::spawn` here, which aborts the call when the handle
-    // gets dropped, since we're not awaiting the response stream here. We'd either have to consume
-    // the entire response here, keep the handle alive or as we currently do use a non-aborting
-    // spawn.
-    //
-    // In the current setup, if the listening side hangs-up the they call may not be aborted.
-    // Depends on what the implementation does when the streaming body's receiving end gets
-    // out of scope.
-    let proxy = self.proxy_bindings.clone();
-    let store = self.store.clone();
-    let handle = tokio::spawn(async move {
-      let mut lock = store.lock();
+    return Ok(
+      Self::call(&self.state.runtime_state, async move {
+        let (sender, receiver) = tokio::sync::oneshot::channel::<
+          Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, ErrorCode>,
+        >();
 
-      let req = lock.data_mut().new_incoming_request(
-        wasmtime_wasi_http::bindings::http::types::Scheme::Http,
-        request,
-      )?;
+        // NOTE: wstd streams out responses in chunks of 2kB. Only once everything has been streamed,
+        // `call_handle` will complete. This is also when the streaming response body completes.
+        //
+        // We cannot use `wasmtime_wasi::runtime::spawn` here, which aborts the call when the handle
+        // gets dropped, since we're not awaiting the response stream here. We'd either have to consume
+        // the entire response here, keep the handle alive or as we currently do use a non-aborting
+        // spawn.
+        //
+        // In the current setup, if the listening side hangs-up the they call may not be aborted.
+        // Depends on what the implementation does when the streaming body's receiving end gets
+        // out of scope.
+        let handle = tokio::spawn(async move {
+          let mut lock = state.store.lock().await;
 
-      let out = lock.data_mut().new_response_outparam(sender)?;
+          let req = lock.data_mut().new_incoming_request(
+            wasmtime_wasi_http::bindings::http::types::Scheme::Http,
+            request,
+          )?;
 
-      let handle = proxy.wasi_http_incoming_handler();
+          let out = lock.data_mut().new_response_outparam(sender)?;
 
-      handle.call_handle(lock.as_context_mut(), req, out).await
+          state
+            .proxy_bindings
+            .wasi_http_incoming_handler()
+            .call_handle(lock.as_context_mut(), req, out)
+            .await
+        });
+
+        match receiver.await {
+          Ok(Ok(resp)) => {
+            // NOTE: We cannot await the completion `call_handle` here with `handle.await?;`, since
+            // we're not consuming the response body, see above.
+            Ok(resp)
+          }
+          Ok(Err(err)) => {
+            handle
+              .await
+              .map_err(|err| Error::Other(err.to_string()))??;
+            Err(Error::HttpErrorCode(err))
+          }
+          Err(_) => {
+            log::debug!("channel closed");
+            handle
+              .await
+              .map_err(|err| Error::Other(err.to_string()))??;
+            Err(Error::ChannelClosed)
+          }
+        }
+      })
+      .await
+      .unwrap()?,
+    );
+  }
+
+  fn call<F>(
+    rt: &Arc<RuntimeInternal<Arc<SharedState>>>,
+    f: F,
+  ) -> impl Future<Output = Result<F::Output, JoinError>>
+  where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+  {
+    let state = rt.clone();
+
+    #[cfg(debug_assertions)]
+    log::debug!(
+      "WASM runtime ({path:?}) waiting for new messages. In flight: {}, {}",
+      state.local_in_flight.load(Ordering::Relaxed),
+      IN_FLIGHT.load(Ordering::Relaxed),
+      path = state.component_path,
+    );
+
+    state.local_in_flight.fetch_add(1, Ordering::Relaxed);
+    IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+
+    return rt.rt_handle.spawn(async move {
+      let r = f.await;
+
+      IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+      state.local_in_flight.fetch_sub(1, Ordering::Relaxed);
+
+      r
     });
-
-    return match receiver.await {
-      Ok(Ok(resp)) => {
-        // NOTE: We cannot await the completion `call_handle` here with `handle.await?;`, since
-        // we're not consuming the response body, see above.
-        Ok(resp)
-      }
-      Ok(Err(err)) => {
-        handle
-          .await
-          .map_err(|err| Error::Other(err.to_string()))??;
-        Err(Error::HttpErrorCode(err))
-      }
-      Err(_) => {
-        log::debug!("channel closed");
-        handle
-          .await
-          .map_err(|err| Error::Other(err.to_string()))??;
-        Err(Error::ChannelClosed)
-      }
-    };
   }
 }
 
@@ -560,10 +521,8 @@ mod tests {
     let conn = trailbase_sqlite::Connection::open_in_memory().unwrap();
     let runtime = init_runtime(Some(conn.clone()));
 
-    runtime
-      .initialize(InitArgs { version: None })
-      .await
-      .unwrap();
+    let mut store = HttpStore::new(&runtime).await.unwrap();
+    store.initialize(InitArgs { version: None }).await.unwrap();
 
     let response = send_http_request(
       &runtime,
@@ -654,6 +613,7 @@ mod tests {
       .body(sqlite::bytes_to_body(Bytes::from_static(b"")))
       .unwrap();
 
-    return runtime.call_incoming_http_handler(request).await;
+    let mut store = HttpStore::new(&runtime).await.unwrap();
+    return store.call_incoming_http_handler(request).await;
   }
 }

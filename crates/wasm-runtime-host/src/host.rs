@@ -60,14 +60,14 @@ pub struct SharedState {
 }
 
 /// State for one runtime instance.
-pub(crate) struct State {
-  pub resource_table: ResourceTable,
-  pub wasi_ctx: WasiCtx,
-  pub http: WasiHttpCtx,
-  pub kv: WasiKeyValueCtx,
+pub struct State {
+  pub(crate) resource_table: ResourceTable,
+  pub(crate) wasi_ctx: WasiCtx,
+  pub(crate) http: WasiHttpCtx,
+  pub(crate) kv: WasiKeyValueCtx,
 
-  pub shared: Arc<SharedState>,
-  pub tx: Arc<Mutex<Option<crate::sqlite::OwnedTx>>>,
+  pub(crate) shared: Arc<SharedState>,
+  pub(crate) tx: Arc<Mutex<Option<crate::sqlite::OwnedTx>>>,
 }
 
 impl Drop for State {

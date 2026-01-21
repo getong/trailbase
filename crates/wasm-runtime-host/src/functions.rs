@@ -2,7 +2,7 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use wasmtime::{Result, Store};
 
-use crate::Error;
+use crate::{Error, host::SharedState};
 
 pub struct SqliteScalarFunction {
   pub name: String,
@@ -20,9 +20,7 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-  pub async fn new<T: crate::StoreBuilder<crate::host::State>>(
-    runtime: &crate::Runtime<T>,
-  ) -> Result<Self, Error> {
+  pub async fn new(runtime: &crate::Runtime<Arc<SharedState>>) -> Result<Self, Error> {
     let (store, bindings) = runtime.new_bindings().await?;
     return Ok(Self { store, bindings });
   }
