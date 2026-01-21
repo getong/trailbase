@@ -14,13 +14,15 @@ pub struct SqliteFunctions {
   pub scalar_functions: Vec<SqliteScalarFunction>,
 }
 
-pub struct Foo {
+pub struct SqliteStore {
   store: Store<crate::host::State>,
   bindings: crate::host::Interfaces,
 }
 
-impl Foo {
-  pub async fn new(runtime: &crate::Context) -> Result<Self, Error> {
+impl SqliteStore {
+  pub async fn new<T: crate::StoreBuilder<crate::host::State>>(
+    runtime: &crate::Runtime<T>,
+  ) -> Result<Self, Error> {
     let (store, bindings) = runtime.new_bindings().await?;
     return Ok(Self { store, bindings });
   }
@@ -85,7 +87,7 @@ impl Foo {
 
 pub fn setup_connection(
   conn: &rusqlite::Connection,
-  runtime: Arc<Mutex<Foo>>,
+  runtime: Arc<Mutex<SqliteStore>>,
   functions: &SqliteFunctions,
 ) -> Result<(), rusqlite::Error> {
   use crate::host::exports::trailbase::component::sqlite_function_endpoint::Value;

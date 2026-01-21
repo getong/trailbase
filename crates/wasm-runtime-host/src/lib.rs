@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use trailbase_wasi_keyvalue::WasiKeyValueCtx;
 use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Config, Engine, Result, Store};
+use wasmtime::{AsContext, AsContextMut, Config, Engine, Result, Store};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 use wasmtime_wasi_http::bindings::http::types::ErrorCode;
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
@@ -50,21 +50,38 @@ pub struct RuntimeOptions {
 
   /// Whether to use the non-optimizing baseline compiler.
   pub use_winch: bool,
+
+  /// Which tokio runtime handle to execute on.
+  pub tokio_runtime: Option<tokio::runtime::Handle>,
 }
 
-pub struct Runtime {
+pub trait StoreBuilder<S> {
+  fn new_store(&self, engine: &Engine) -> Result<Store<S>, Error>;
+}
+
+pub struct Runtime<T: StoreBuilder<State>> {
+  state: Arc<RuntimeInternal<T>>,
+}
+
+// NOTE: A better name may be Component.
+struct RuntimeInternal<T: StoreBuilder<State>> {
+  engine: Engine,
+  linker: Linker<State>,
+
+  component: Component,
   /// Path to original .wasm component file.
+  component_path: PathBuf,
+
+  store_builder: T,
+
   rt_handle: tokio::runtime::Handle,
   local_in_flight: AtomicUsize,
-  context: Arc<Context>,
 }
 
-impl Runtime {
+impl<T: StoreBuilder<State>> Runtime<T> {
   pub fn init(
-    rt: Option<tokio::runtime::Handle>,
     wasm_source_file: PathBuf,
-    conn: trailbase_sqlite::Connection,
-    kv_store: KvStore,
+    store_builder: T,
     opts: RuntimeOptions,
   ) -> Result<Self, Error> {
     let engine = {
@@ -116,43 +133,32 @@ impl Runtime {
       linker
     };
 
-    let rt_handle = rt.unwrap_or_else(|| {
+    let rt_handle = opts.tokio_runtime.unwrap_or_else(|| {
       log::debug!("Re-using Tokio runtime from context");
       tokio::runtime::Handle::current()
     });
 
-    let context = Arc::new(Context {
-      engine: engine.clone(),
-      component: component.clone(),
-      linker: linker.clone(),
-      shared: Arc::new(SharedState {
-        conn: conn.clone(),
-        kv_store: kv_store.clone(),
-        fs_root_path: opts.fs_root_path.clone(),
-        component_path: wasm_source_file,
-      }),
-    });
-
-    return Ok(Self {
+    let state = Arc::new(RuntimeInternal {
+      engine,
+      linker,
+      component,
+      component_path: wasm_source_file,
+      store_builder,
       rt_handle,
       local_in_flight: AtomicUsize::new(0),
-      context,
     });
+
+    return Ok(Self { state });
   }
 
   pub fn component_path(&self) -> &PathBuf {
-    return &self.context.shared.component_path;
+    return &self.state.component_path;
   }
 
   /// Call WASM component's `init` implementation.
   pub async fn initialize(&self, args: InitArgs) -> Result<InitResult, Error> {
-    let context = self.context.clone();
-    return self
-      .call(async move {
-        let mut foo = Foo::new(&context).await?;
-        foo.initialize(args).await
-      })
-      .await?;
+    let mut foo = HttpStore::new(&self).await?;
+    return self.call(async move { foo.initialize(args).await }).await?;
   }
 
   /// Call http handlers exported by WASM component ("incoming" from the perspective of the
@@ -161,12 +167,9 @@ impl Runtime {
     &self,
     request: hyper::Request<UnsyncBoxBody<Bytes, hyper::Error>>,
   ) -> Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, Error> {
-    let context = self.context.clone();
+    let mut foo = HttpStore::new(&self).await?;
     return self
-      .call(async move {
-        let mut foo = Foo::new(&context).await?;
-        foo.call_incoming_http_handler(request).await
-      })
+      .call(async move { foo.call_incoming_http_handler(request).await })
       .await?;
   }
 
@@ -178,20 +181,40 @@ impl Runtime {
     #[cfg(debug_assertions)]
     log::debug!(
       "WASM runtime ({path:?}) waiting for new messages. In flight: {}, {}",
-      self.local_in_flight.load(Ordering::Relaxed),
+      self.state.local_in_flight.load(Ordering::Relaxed),
       IN_FLIGHT.load(Ordering::Relaxed),
-      path = self.context.shared.component_path,
+      path = self.state.component_path,
     );
 
-    self.local_in_flight.fetch_add(1, Ordering::Relaxed);
+    self.state.local_in_flight.fetch_add(1, Ordering::Relaxed);
     IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
 
-    let result = self.rt_handle.spawn(f).await;
+    let result = self.state.rt_handle.spawn(f).await;
 
     IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
-    self.local_in_flight.fetch_sub(1, Ordering::Relaxed);
+    self.state.local_in_flight.fetch_sub(1, Ordering::Relaxed);
 
     return result.map_err(|_err| Error::ChannelClosed);
+  }
+
+  async fn new_bindings(&self) -> Result<(Store<State>, crate::host::Interfaces), Error> {
+    let mut store = self.state.store_builder.new_store(&self.state.engine)?;
+
+    let bindings = crate::host::Interfaces::instantiate_async(
+      &mut store,
+      &self.state.component,
+      &self.state.linker,
+    )
+    .await
+    .map_err(|err| {
+      log::error!(
+        "Failed to instantiate WIT component {path:?}: '{err}'.\n{ABI_MISMATCH_WARNING}",
+        path = self.state.component_path
+      );
+      return err;
+    })?;
+
+    return Ok((store, bindings));
   }
 }
 
@@ -207,17 +230,14 @@ pub struct InitResult {
   pub job_handlers: Vec<(String, String)>,
 }
 
-// NOTE: A better name may be Component.
-struct Context {
-  engine: Engine,
-  component: Component,
-  linker: Linker<State>,
+// struct HttpStoreBuilder {
+//   pub conn: trailbase_sqlite::Connection,
+//   pub kv_store: trailbase_wasi_keyvalue::Store,
+//   pub fs_root_path: Option<PathBuf>,
+// }
 
-  shared: Arc<SharedState>,
-}
-
-impl Context {
-  fn new_store(&self) -> Result<Store<State>, Error> {
+impl StoreBuilder<State> for Arc<SharedState> {
+  fn new_store(&self, engine: &Engine) -> Result<Store<State>, Error> {
     let mut wasi_ctx = WasiCtxBuilder::new();
     wasi_ctx.inherit_stdio();
     wasi_ctx.stdin(wasmtime_wasi::p2::pipe::ClosedInputStream);
@@ -229,60 +249,99 @@ impl Context {
     wasi_ctx.allow_udp(false);
     wasi_ctx.allow_ip_name_lookup(true);
 
-    if let Some(ref path) = self.shared.fs_root_path {
+    if let Some(ref path) = self.fs_root_path {
       wasi_ctx
         .preopened_dir(path, "/", DirPerms::READ, FilePerms::READ)
         .map_err(|err| Error::Other(err.to_string()))?;
     }
 
     return Ok(Store::new(
-      &self.engine,
+      &engine,
       State {
         resource_table: ResourceTable::new(),
         wasi_ctx: wasi_ctx.build(),
         http: WasiHttpCtx::new(),
-        kv: WasiKeyValueCtx::new(self.shared.kv_store.clone()),
-        shared: self.shared.clone(),
+        kv: WasiKeyValueCtx::new(self.kv_store.clone()),
+        shared: self.clone(),
         tx: Arc::new(Mutex::new(None)),
       },
     ));
   }
-
-  async fn new_bindings(&self) -> Result<(Store<State>, crate::host::Interfaces), Error> {
-    let mut store = self.new_store()?;
-
-    let bindings =
-      crate::host::Interfaces::instantiate_async(&mut store, &self.component, &self.linker)
-        .await
-        .map_err(|err| {
-          log::error!(
-            "Failed to instantiate WIT component {path:?}: '{err}'.\n{ABI_MISMATCH_WARNING}",
-            path = self.shared.component_path
-          );
-          return err;
-        })?;
-
-    return Ok((store, bindings));
-  }
 }
 
-struct Foo {
+impl<T: StoreBuilder<State>> RuntimeInternal<T> {
+  // fn new_store(&self) -> Result<Store<State>, Error> {
+  //   let mut wasi_ctx = WasiCtxBuilder::new();
+  //   wasi_ctx.inherit_stdio();
+  //   wasi_ctx.stdin(wasmtime_wasi::p2::pipe::ClosedInputStream);
+  //   // wasi_ctx.stdout(wasmtime_wasi::p2::Stdout);
+  //   // wasi_ctx.stderr(wasmtime_wasi::p2::Stderr);
+  //
+  //   wasi_ctx.args(&[""]);
+  //   wasi_ctx.allow_tcp(false);
+  //   wasi_ctx.allow_udp(false);
+  //   wasi_ctx.allow_ip_name_lookup(true);
+  //
+  //   if let Some(ref path) = self.shared.fs_root_path {
+  //     wasi_ctx
+  //       .preopened_dir(path, "/", DirPerms::READ, FilePerms::READ)
+  //       .map_err(|err| Error::Other(err.to_string()))?;
+  //   }
+  //
+  //   return Ok(Store::new(
+  //     &self.engine,
+  //     State {
+  //       resource_table: ResourceTable::new(),
+  //       wasi_ctx: wasi_ctx.build(),
+  //       http: WasiHttpCtx::new(),
+  //       kv: WasiKeyValueCtx::new(self.shared.kv_store.clone()),
+  //       shared: self.shared.clone(),
+  //       tx: Arc::new(Mutex::new(None)),
+  //     },
+  //   ));
+  // }
+
+  // async fn new_bindings(&self) -> Result<(Store<State>, crate::host::Interfaces), Error> {
+  //   let mut store = self.new_store()?;
+  //
+  //   let bindings =
+  //     crate::host::Interfaces::instantiate_async(&mut store, &self.component, &self.linker)
+  //       .await
+  //       .map_err(|err| {
+  //         log::error!(
+  //           "Failed to instantiate WIT component {path:?}: '{err}'.\n{ABI_MISMATCH_WARNING}",
+  //           path = self.component_path
+  //         );
+  //         return err;
+  //       })?;
+  //
+  //   return Ok((store, bindings));
+  // }
+}
+
+struct HttpStore {
   store: Arc<Mutex<Store<State>>>,
   bindings: crate::host::Interfaces,
-
-  component: Component,
-  linker: Linker<State>,
+  proxy_bindings: Arc<wasmtime_wasi_http::bindings::Proxy>,
 }
 
-impl Foo {
-  async fn new(ctx: &Context) -> Result<Self, Error> {
-    let (store, bindings) = ctx.new_bindings().await?;
+impl HttpStore {
+  async fn new<T: StoreBuilder<State>>(ctx: &Runtime<T>) -> Result<Self, Error> {
+    let (mut store, bindings) = ctx.new_bindings().await?;
+
+    let proxy_bindings = Arc::new(
+      wasmtime_wasi_http::bindings::Proxy::instantiate_async(
+        &mut store,
+        &ctx.state.component,
+        &ctx.state.linker,
+      )
+      .await?,
+    );
 
     return Ok(Self {
       store: Arc::new(Mutex::new(store)),
       bindings,
-      component: ctx.component.clone(),
-      linker: ctx.linker.clone(),
+      proxy_bindings,
     });
   }
 
@@ -311,16 +370,6 @@ impl Foo {
     &mut self,
     request: hyper::Request<UnsyncBoxBody<Bytes, hyper::Error>>,
   ) -> Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, Error> {
-    let proxy = {
-      let mut lock = self.store.lock();
-      wasmtime_wasi_http::bindings::Proxy::instantiate_async(
-        &mut *lock,
-        &self.component,
-        &self.linker,
-      )
-      .await?
-    };
-
     let (sender, receiver) = tokio::sync::oneshot::channel::<
       Result<hyper::Response<wasmtime_wasi_http::body::HyperOutgoingBody>, ErrorCode>,
     >();
@@ -336,6 +385,7 @@ impl Foo {
     // In the current setup, if the listening side hangs-up the they call may not be aborted.
     // Depends on what the implementation does when the streaming body's receiving end gets
     // out of scope.
+    let proxy = self.proxy_bindings.clone();
     let store = self.store.clone();
     let handle = tokio::spawn(async move {
       let mut lock = store.lock();
@@ -347,10 +397,9 @@ impl Foo {
 
       let out = lock.data_mut().new_response_outparam(sender)?;
 
-      proxy
-        .wasi_http_incoming_handler()
-        .call_handle(&mut *lock, req, out)
-        .await
+      let handle = proxy.wasi_http_incoming_handler();
+
+      handle.call_handle(lock.as_context_mut(), req, out).await
     });
 
     return match receiver.await {
@@ -467,14 +516,20 @@ mod tests {
   use parking_lot::lock_api::Mutex;
   use trailbase_wasm_common::{HttpContext, HttpContextKind};
 
+  use crate::host::SharedState;
+
   const WASM_COMPONENT_PATH: &str = "../../client/testfixture/wasm/wasm_guest_testfixture.wasm";
 
-  fn init_runtime(conn: trailbase_sqlite::Connection) -> Runtime {
+  fn init_runtime(conn: Option<trailbase_sqlite::Connection>) -> Runtime<Arc<SharedState>> {
+    let shared_state = Arc::new(SharedState {
+      conn,
+      kv_store: KvStore::new(),
+      fs_root_path: None,
+    });
+
     return Runtime::init(
-      None,
       WASM_COMPONENT_PATH.into(),
-      conn.clone(),
-      KvStore::new(),
+      shared_state,
       RuntimeOptions {
         ..Default::default()
       },
@@ -482,21 +537,11 @@ mod tests {
     .unwrap();
   }
 
-  async fn init_sqlite_function_runtime(conn: &rusqlite::Connection) -> Runtime {
-    // FIXME: We shouldn't pass a trailbase_sqlite::Connection into a runtime for sqlite
-    // functions.
-    let trailbase_conn = trailbase_sqlite::Connection::open_in_memory().unwrap();
-    let runtime = init_runtime(trailbase_conn);
-    // let runtime = functions::SqliteFunctionRuntime::new(
-    //   WASM_COMPONENT_PATH.into(),
-    //   RuntimeOptions {
-    //     ..Default::default()
-    //   },
-    // )
-    // .unwrap();
+  async fn init_sqlite_function_runtime(conn: &rusqlite::Connection) -> Runtime<Arc<SharedState>> {
+    let runtime = init_runtime(None);
 
     let foo = Arc::new(Mutex::new(
-      functions::Foo::new(&runtime.context).await.unwrap(),
+      functions::SqliteStore::new(&runtime).await.unwrap(),
     ));
 
     let functions = foo
@@ -513,7 +558,7 @@ mod tests {
   #[tokio::test]
   async fn test_init() {
     let conn = trailbase_sqlite::Connection::open_in_memory().unwrap();
-    let runtime = init_runtime(conn.clone());
+    let runtime = init_runtime(Some(conn.clone()));
 
     runtime
       .initialize(InitArgs { version: None })
@@ -543,7 +588,7 @@ mod tests {
   #[tokio::test]
   async fn test_transaction() {
     let conn = trailbase_sqlite::Connection::open_in_memory().unwrap();
-    let runtime = Arc::new(init_runtime(conn.clone()));
+    let runtime = Arc::new(init_runtime(Some(conn.clone())));
 
     let futures: Vec<_> = (0..256)
       .map(|_| {
@@ -570,7 +615,7 @@ mod tests {
     let _sqlite_function_runtime = init_sqlite_function_runtime(&conn).await;
 
     let conn = trailbase_sqlite::Connection::from_connection_test_only(conn);
-    let runtime = init_runtime(conn.clone());
+    let runtime = init_runtime(Some(conn.clone()));
 
     let response = send_http_request(&runtime, "http://localhost:4000/custom_fun", "/custom_fun")
       .await
@@ -583,7 +628,7 @@ mod tests {
   }
 
   async fn send_http_request(
-    runtime: &Runtime,
+    runtime: &Runtime<Arc<SharedState>>,
     uri: &str,
     registered_path: &str,
   ) -> Result<Response<UnsyncBoxBody<Bytes, ErrorCode>>, Error> {

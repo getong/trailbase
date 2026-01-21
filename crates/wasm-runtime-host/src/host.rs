@@ -52,15 +52,14 @@ use self::trailbase::database::sqlite::{TxError, Value};
 /// NOTE: This is needed due to State needing to be Send.
 unsafe impl Send for crate::sqlite::OwnedTx {}
 
+/// Shared state, which can be shared across multiple runtime instances.
 pub struct SharedState {
-  pub conn: trailbase_sqlite::Connection,
+  pub conn: Option<trailbase_sqlite::Connection>,
   pub kv_store: trailbase_wasi_keyvalue::Store,
   pub fs_root_path: Option<PathBuf>,
-
-  /// Path to original .wasm component file.
-  pub component_path: PathBuf,
 }
 
+/// State for one runtime instance.
 pub(crate) struct State {
   pub resource_table: ResourceTable,
   pub wasi_ctx: WasiCtx,
@@ -120,7 +119,7 @@ impl WasiHttpView for State {
 
     return match request.uri().host() {
       Some("__sqlite") => {
-        let conn = self.shared.conn.clone();
+        let conn = self.shared.conn.clone().expect("FIXME");
         Ok(
           wasmtime_wasi_http::types::HostFutureIncomingResponse::pending(
             wasmtime_wasi::runtime::spawn(async move {
@@ -210,7 +209,12 @@ impl self::trailbase::database::sqlite::Host for State {
     }
 
     let tx = self.tx.clone();
-    return async move { begin(self.shared.conn.clone(), &tx).await };
+    return async move {
+      let Some(conn) = self.shared.conn.clone() else {
+        return Err(TxError::Other("missing conn".into()));
+      };
+      begin(conn, &tx).await
+    };
   }
 
   fn tx_commit(&mut self) -> Result<(), TxError> {
