@@ -1027,7 +1027,7 @@ pub async fn subscribe_ws(
         match msg {
           WsProtocol::Init { auth_token } => {
             if let Some(auth_token) = auth_token {
-              let Ok(claims) = crate::auto::TokenClaims::from_auth_token(state.jwt(), &auth_token)
+              let Ok(claims) = crate::auth::TokenClaims::from_auth_token(state.jwt(), &auth_token)
               else {
                 abort(&mut ws_sender, Code::Policy, "unauthorized").await;
                 return None;

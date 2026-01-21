@@ -523,7 +523,7 @@ mod tests {
     let conn = trailbase_sqlite::Connection::open_in_memory().unwrap();
     let runtime = init_runtime(Some(conn.clone()));
 
-    let mut store = HttpStore::new(&runtime).await.unwrap();
+    let store = HttpStore::new(&runtime).await.unwrap();
     store.initialize(InitArgs { version: None }).await.unwrap();
 
     let response = send_http_request(

@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use trailbase_sqlite::{Params, Rows};
 use trailbase_wasi_keyvalue::WasiKeyValueCtx;
-use wasmtime::Result;
 use wasmtime::component::{Accessor, HasData, ResourceTable};
+use wasmtime::{AsContextMut, Result};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 use wasmtime_wasi_io::IoView;
@@ -40,7 +40,7 @@ wasmtime::component::bindgen!({
     // to return traps from generated functions.
     imports: {
         "trailbase:database/sqlite.tx-begin": async,
-        "trailbase:database/sqlite.test": async,
+        "trailbase:database/sqlite.execute": async,
     },
     exports: {
         default: async,
@@ -142,56 +142,52 @@ impl HasData for State {
 }
 
 impl self::trailbase::database::sqlite::HostWithStore for State {
-  async fn test<T>(_accessor: &Accessor<T, Self>) -> String {
-    return "".to_string();
+  async fn execute<T>(
+    accessor: &Accessor<T, Self>,
+    query: String,
+    params: Vec<Value>,
+  ) -> Result<u64, TxError> {
+    let Some(conn) = accessor.with(|mut a| a.get().shared.conn.clone()) else {
+      return Err(TxError::Other("missing conn".to_string()));
+    };
+
+    let params: Vec<_> = params.into_iter().map(to_sqlite_value).collect();
+
+    return conn
+      .execute(query, params)
+      .await
+      .map_err(|err| TxError::Other(err.to_string()))
+      .map(|v| v as u64);
+  }
+
+  async fn query<T>(
+    accessor: &Accessor<T, Self>,
+    query: String,
+    params: Vec<Value>,
+  ) -> Result<Vec<Vec<Value>>, TxError> {
+    let Some(conn) = accessor.with(|mut a| a.get().shared.conn.clone()) else {
+      return Err(TxError::Other("missing conn".to_string()));
+    };
+
+    let params: Vec<_> = params.into_iter().map(to_sqlite_value).collect();
+
+    let rows = conn
+      .write_query_rows(query, params)
+      .await
+      .map_err(|err| TxError::Other(err.to_string()))?;
+
+    let values: Vec<_> = rows
+      .into_iter()
+      .map(|trailbase_sqlite::Row(row, _col)| {
+        return row.into_iter().map(from_sqlite_value).collect::<Vec<_>>();
+      })
+      .collect();
+
+    return Ok(values);
   }
 }
 
 impl self::trailbase::database::sqlite::Host for State {
-  // fn execute(
-  //   &mut self,
-  //   query: String,
-  //   params: Vec<Value>,
-  // ) -> impl Future<Output = wasmtime::Result<Result<u64, TxError>>> + Send {
-  //   let conn = self.shared.conn.clone();
-  //   let params: Vec<_> = params.into_iter().map(to_sqlite_value).collect();
-  //
-  //   return async move {
-  //     Ok(
-  //       conn
-  //         .execute(query, params)
-  //         .await
-  //         .map_err(|err| TxError::Other(err.to_string()))
-  //         .map(|v| v as u64),
-  //     )
-  //   };
-  // }
-  //
-  // fn query(
-  //   &mut self,
-  //   query: String,
-  //   params: Vec<Value>,
-  // ) -> impl Future<Output = wasmtime::Result<Result<Vec<Vec<Value>>, TxError>>> + Send {
-  //   let conn = self.shared.conn.clone();
-  //   let params: Vec<_> = params.into_iter().map(to_sqlite_value).collect();
-  //
-  //   return async move {
-  //     let rows = conn
-  //       .write_query_rows(query, params)
-  //       .await
-  //       .map_err(|err| TxError::Other(err.to_string()))?;
-  //
-  //     let values: Vec<_> = rows
-  //       .into_iter()
-  //       .map(|trailbase_sqlite::Row(row, _col)| {
-  //         return row.into_iter().map(from_sqlite_value).collect::<Vec<_>>();
-  //       })
-  //       .collect();
-  //
-  //     Ok(Ok(values))
-  //   };
-  // }
-
   fn tx_begin(&mut self) -> impl Future<Output = Result<(), TxError>> + Send {
     async fn begin(
       conn: trailbase_sqlite::Connection,

@@ -332,36 +332,6 @@ fn init_main_db_impl(
   let main_path = data_dir.map(|d| d.main_db_path());
   let migrations_path = data_dir.map(|d| d.migrations_path());
 
-  // #[cfg(feature = "wasm")]
-  // let sqlite_functions: Vec<(
-  //   Runtime,
-  //   trailbase_wasm_runtime_host::functions::SqliteFunctions,
-  // )> = runtimes
-  //   .into_iter()
-  //   .filter_map(
-  //     |rt| -> Option<Result<_, trailbase_wasm_runtime_host::Error>> {
-  //       use trailbase_wasm_runtime_host::functions::SqliteStore;
-  //
-  //       let store = SqliteStore::new(rt).await.unwrap();
-  //
-  //       let functions = match rt
-  //         .initialize_sqlite_functions(trailbase_wasm_runtime_host::InitArgs { version: None })
-  //       {
-  //         Ok(functions) => functions,
-  //         Err(err) => {
-  //           return Some(Err(err));
-  //         }
-  //       };
-  //
-  //       if !functions.scalar_functions.is_empty() {
-  //         return Some(Ok((rt, functions)));
-  //       }
-  //       return None;
-  //     },
-  //   )
-  //   .collect::<Result<Vec<_>, _>>()
-  //   .map_err(|err| return ConnectionError::Other(err.to_string()))?;
-
   let mut new_db = AtomicBool::new(false);
   let conn = {
     let migrations_path = migrations_path.clone();
