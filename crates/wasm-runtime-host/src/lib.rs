@@ -307,9 +307,9 @@ impl HttpStore {
       // `call_handle` will complete. This is also when the streaming response body completes.
       //
       // We cannot use `wasmtime_wasi::runtime::spawn` here, which aborts the call when the handle
-      // gets dropped, since we're not awaiting the response stream here. We'd either have to consume
-      // the entire response here, keep the handle alive or as we currently do use a non-aborting
-      // spawn.
+      // gets dropped, since we're not awaiting the response stream here. We'd either have to
+      // consume the entire response here, keep the handle alive or as we currently do use a
+      // non-aborting spawn.
       //
       // In the current setup, if the listening side hangs-up the they call may not be aborted.
       // Depends on what the implementation does when the streaming body's receiving end gets
@@ -427,6 +427,7 @@ fn build_config(cache: Option<wasmtime::Cache>, use_winch: bool) -> Config {
   // compile-time setting to make all guest-exported bindings async... *all*. With this enabled
   // calling synchronous bindings will panic.
   config.async_support(true);
+  config.wasm_component_model_async(true);
   // config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
 
   // Compilation settings.
