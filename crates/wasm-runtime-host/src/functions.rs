@@ -165,6 +165,8 @@ pub fn setup_connection(
             return rusqlite::Error::UserFunctionError(err.into());
           })?;
 
+        tokio.shutdown_timeout(tokio::time::Duration::from_millis(200));
+
         return Ok(match value {
           Value::Null => rusqlite::types::Value::Null,
           Value::Integer(i) => rusqlite::types::Value::Integer(i),
