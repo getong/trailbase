@@ -118,7 +118,12 @@ impl WasiHttpView for State {
 
     return match request.uri().host() {
       Some("__sqlite") => {
-        let conn = self.shared.conn.clone().expect("FIXME");
+        let conn = self.shared.conn.clone().ok_or_else(|| {
+          debug_assert!(false, "missing SQLite connection");
+          wasmtime_wasi_http::bindings::http::types::ErrorCode::InternalError(Some(
+            "missing SQLite connection".to_string(),
+          ))
+        })?;
         Ok(
           wasmtime_wasi_http::types::HostFutureIncomingResponse::pending(
             wasmtime_wasi::runtime::spawn(async move {
