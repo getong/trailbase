@@ -131,7 +131,7 @@ pub fn setup_connection(
         let tokio = tokio::runtime::Builder::new_current_thread()
           .enable_time()
           .build()
-          .expect("success");
+          .expect("running on a 'raw' thread of trailbase-sqlite");
 
         let value = tokio
           .block_on(

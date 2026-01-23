@@ -192,12 +192,6 @@ pub struct InitResult {
   pub job_handlers: Vec<(String, String)>,
 }
 
-// struct HttpStoreBuilder {
-//   pub conn: trailbase_sqlite::Connection,
-//   pub kv_store: trailbase_wasi_keyvalue::Store,
-//   pub fs_root_path: Option<PathBuf>,
-// }
-
 impl StoreBuilder<State> for Arc<SharedState> {
   fn new_store(&self, engine: &Engine) -> Result<Store<State>, Error> {
     let mut wasi_ctx = WasiCtxBuilder::new();
