@@ -46,9 +46,7 @@ pub(crate) async fn build_sync_wasm_runtimes_for_components(
         use_winch: if cfg!(target_os = "macos") {
           false
         } else {
-          // Winch currently doesn't support "component-model-async"
-          // use_winch
-          false
+          use_winch
         },
         tokio_runtime: None,
       },
@@ -105,9 +103,7 @@ pub(crate) fn wasm_runtimes_builder(
             use_winch: if cfg!(target_os = "macos") {
               false
             } else {
-              // Winch currently doesn't support "component-model-async"
-              // dev
-              false
+              dev
             },
             tokio_runtime: rt.clone(),
           },

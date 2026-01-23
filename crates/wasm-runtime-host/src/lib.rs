@@ -427,7 +427,6 @@ fn build_config(cache: Option<wasmtime::Cache>, use_winch: bool) -> Config {
   // compile-time setting to make all guest-exported bindings async... *all*. With this enabled
   // calling synchronous bindings will panic.
   config.async_support(true);
-  config.wasm_component_model_async(true);
   // config.wasm_backtrace_details(wasmtime::WasmBacktraceDetails::Enable);
 
   // Compilation settings.
