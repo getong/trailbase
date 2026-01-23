@@ -10,14 +10,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use trailbase_wasm_common::{HttpContext, HttpContextKind, HttpContextUser};
-use trailbase_wasm_runtime_host::functions::SqliteStore;
 use trailbase_wasm_runtime_host::{InitArgs, RuntimeOptions, find_wasm_components};
 
 use crate::User;
 use crate::util::urlencode;
 use crate::{AppState, DataDir};
 
-pub(crate) use trailbase_wasm_runtime_host::functions::SqliteFunctions;
+pub(crate) use trailbase_wasm_runtime_host::functions::{SqliteFunctions, SqliteStore};
 pub(crate) use trailbase_wasm_runtime_host::{HttpStore, KvStore, Runtime, SharedState};
 
 pub(crate) type AnyError = Box<dyn std::error::Error + Send + Sync>;

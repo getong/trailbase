@@ -10,10 +10,9 @@ use trailbase_extension::jsonschema::JsonSchemaRegistry;
 use trailbase_schema::metadata::ConnectionMetadata;
 use trailbase_schema::sqlite::{Table, View};
 
-use trailbase_wasm_runtime_host::functions::{SqliteFunctions, SqliteStore};
-
 use crate::data_dir::DataDir;
 use crate::migrations::{apply_base_migrations, apply_logs_migrations, apply_main_migrations};
+use crate::wasm::{SqliteFunctions, SqliteStore};
 
 pub use trailbase_sqlite::Connection;
 
