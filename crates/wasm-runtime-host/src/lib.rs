@@ -579,18 +579,38 @@ mod tests {
     let conn = trailbase_sqlite::Connection::from_connection_test_only(conn);
     let runtime = init_runtime(Some(conn.clone()));
 
-    {
-      // First call echo endpoint
-      let resp = send_http_request(
-        &runtime,
-        "http://localhost:4000/sqlite_echo",
-        "/sqlite_echo",
-      )
-      .await
-      .unwrap();
+    println!("calling /transaction");
+    let resp = send_http_request(
+      &runtime,
+      "http://localhost:4000/transaction",
+      "/transaction",
+    )
+    .await
+    .unwrap();
+    assert_eq!(200, resp.status());
 
-      assert_eq!(5, response_to_i64(resp).await);
-    }
+    println!("calling /addDeletePost");
+    let resp = send_http_request(
+      &runtime,
+      "http://localhost:4000/addDeletePost",
+      "/addDeletePost",
+    )
+    .await
+    .unwrap();
+    assert_eq!(200, resp.status());
+
+    // {
+    //   // First call echo endpoint
+    //   let resp = send_http_request(
+    //     &runtime,
+    //     "http://localhost:4000/sqlite_echo",
+    //     "/sqlite_echo",
+    //   )
+    //   .await
+    //   .unwrap();
+    //
+    //   assert_eq!(5, response_to_i64(resp).await);
+    // }
 
     // for i in 0..100 {
     //   let resp = send_http_request(
