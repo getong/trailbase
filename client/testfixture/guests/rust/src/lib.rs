@@ -122,6 +122,7 @@ impl Guest for Endpoints {
         return format!("{}\n", fibonacci(n));
       }),
       routing::get("/sqlite_echo", async |_req| {
+        println!("/sqlite_echo");
         let Value::Integer(i) = &query("SELECT custom_echo(?1)", vec![Value::Integer(5)])
           .await
           .map_err(internal)?[0][0]
@@ -161,6 +162,7 @@ impl Guest for Endpoints {
       SqliteFunction::new::<1>(
         "custom_echo".to_string(),
         |args: [trailbase_wasm::sqlite::Value; _]| {
+          println!("custom_echo");
           return Ok(args[0].clone());
         },
         &[
