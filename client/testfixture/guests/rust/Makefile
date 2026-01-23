@@ -1,6 +1,4 @@
-#TARGET=wasm32-wasip1
 TARGET=wasm32-wasip2
-#TARGET=wasm32-wasip3
 #TARGET=wasm32-unknown-unknown
 
 deploy: clean build

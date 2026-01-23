@@ -503,17 +503,17 @@ mod tests {
   async fn init_sqlite_function_runtime(conn: &rusqlite::Connection) -> Runtime {
     let runtime = init_runtime(None);
 
-    let foo = Arc::new(Mutex::new(
+    let store = Arc::new(Mutex::new(
       functions::SqliteStore::new(&runtime).await.unwrap(),
     ));
 
-    let functions = foo
+    let functions = store
       .lock()
       .initialize_sqlite_functions(InitArgs { version: None })
       .await
       .unwrap();
 
-    functions::setup_connection(conn, foo, &functions).unwrap();
+    functions::setup_connection(conn, store, &functions).unwrap();
 
     return runtime;
   }
