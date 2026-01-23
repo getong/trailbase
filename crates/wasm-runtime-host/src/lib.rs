@@ -578,14 +578,30 @@ mod tests {
     let conn = trailbase_sqlite::Connection::from_connection_test_only(conn);
     let runtime = init_runtime(Some(conn.clone()));
 
-    let response = send_http_request(&runtime, "http://localhost:4000/custom_fun", "/custom_fun")
+    {
+      // First call echo endpoint
+      let resp = send_http_request(
+        &runtime,
+        "http://localhost:4000/sqlite_echo",
+        "/sqlite_echo",
+      )
       .await
       .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK, "{response:?}");
+      assert_eq!(5, response_to_i64(resp).await);
+    }
 
-    let body: Bytes = response.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(body.to_vec(), b"5\n");
+    for i in 0..100 {
+      let resp = send_http_request(
+        &runtime,
+        "http://localhost:4000/sqlite_stateful",
+        "/sqlite_stateful",
+      )
+      .await
+      .unwrap();
+
+      assert_eq!(i, response_to_i64(resp).await);
+    }
   }
 
   async fn send_http_request(
@@ -615,7 +631,13 @@ mod tests {
       .body(sqlite::bytes_to_body(Bytes::from_static(b"")))
       .unwrap();
 
-    let mut store = HttpStore::new(&runtime).await.unwrap();
+    let store = HttpStore::new(&runtime).await.unwrap();
     return store.call_incoming_http_handler(request).await;
+  }
+
+  async fn response_to_i64(resp: Response<UnsyncBoxBody<Bytes, ErrorCode>>) -> i64 {
+    assert_eq!(resp.status(), StatusCode::OK, "{resp:?}");
+    let body: Bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    return String::from_utf8_lossy(&body).trim().parse().unwrap();
   }
 }

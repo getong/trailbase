@@ -52,7 +52,9 @@ pub(crate) async fn build_sync_wasm_runtimes_for_components(
       },
     )?;
 
-    let mut store = SqliteStore::new(&rt).await.expect("FIXME");
+    // Create shared state. In the future we might want to instantiate multiple to avoid cross
+    // SQLite-connection/thread synchronization.
+    let mut store = SqliteStore::new(&rt).await?;
     let functions = store
       .initialize_sqlite_functions(trailbase_wasm_runtime_host::InitArgs { version: None })
       .await?;

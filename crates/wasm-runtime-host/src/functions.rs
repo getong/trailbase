@@ -93,7 +93,7 @@ pub fn setup_connection(
   use crate::host::exports::trailbase::component::sqlite_function_endpoint::Value;
 
   for function in &functions.scalar_functions {
-    let rt = runtime.clone();
+    let runtime = runtime.clone();
     let function_name = function.name.clone();
 
     let flags = {
@@ -135,7 +135,8 @@ pub fn setup_connection(
 
         let value = tokio
           .block_on(
-            rt.lock()
+            runtime
+              .lock()
               .dispatch_scalar_function(function_name.clone(), args),
           )
           .map_err(|err| {
