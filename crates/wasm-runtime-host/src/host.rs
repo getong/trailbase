@@ -111,6 +111,7 @@ impl WasiHttpView for State {
     request: hyper::Request<wasmtime_wasi_http::body::HyperOutgoingBody>,
     config: wasmtime_wasi_http::types::OutgoingRequestConfig,
   ) -> wasmtime_wasi_http::HttpResult<wasmtime_wasi_http::types::HostFutureIncomingResponse> {
+    panic!("send_request 0");
     // log::debug!(
     //   "send_request {:?} {}: {request:?}",
     //   request.uri().host(),
@@ -119,6 +120,7 @@ impl WasiHttpView for State {
 
     return match request.uri().host() {
       Some("__sqlite") => {
+        println!("send_request sqlite 1");
         let conn = self.shared.conn.clone().ok_or_else(|| {
           debug_assert!(false, "missing SQLite connection");
           wasmtime_wasi_http::bindings::http::types::ErrorCode::InternalError(Some(
@@ -134,7 +136,9 @@ impl WasiHttpView for State {
         )
       }
       _ => {
+        println!("send_request http 1");
         let handle = wasmtime_wasi::runtime::spawn(async move {
+          println!("send_request http 2");
           Ok(wasmtime_wasi_http::types::default_send_request_handler(request, config).await)
         });
         Ok(wasmtime_wasi_http::types::HostFutureIncomingResponse::pending(handle))
@@ -170,17 +174,31 @@ impl self::trailbase::database::sqlite::HostWithStore for State {
     query: String,
     params: Vec<Value>,
   ) -> Result<Vec<Vec<Value>>, TxError> {
+    println!("host query 0");
     let Some(conn) = accessor.with(|mut a| a.get().shared.conn.clone()) else {
       return Err(TxError::Other("missing conn".to_string()));
     };
 
     let params: Vec<_> = params.into_iter().map(to_sqlite_value).collect();
 
+    println!("host query 1");
+    // return Ok(vec![]);
+    // let rows = tokio::spawn(async move { conn.write_query_rows(query, params).await })
+    //   .await
+    //   .expect("FIXME")
+    //   .map_err(|err| TxError::Other(err.to_string()))?;
+
+    // let rows =
+    //   wasmtime_wasi::runtime::spawn(async move { conn.write_query_rows(query, params).await })
+    //     .await
+    //     .map_err(|err| TxError::Other(err.to_string()))?;
+
     let rows = conn
       .write_query_rows(query, params)
       .await
       .map_err(|err| TxError::Other(err.to_string()))?;
 
+    println!("host query 2");
     let values: Vec<_> = rows
       .into_iter()
       .map(|trailbase_sqlite::Row(row, _col)| {

@@ -61,6 +61,7 @@ pub async fn query(
   query: impl std::string::ToString,
   params: impl Into<Vec<Value>>,
 ) -> Result<Vec<Vec<Value>>, Error> {
+  println!("query 0");
   return call_query(query.to_string(), params.into())
     .await
     .map_err(|err| Error::Other(err.to_string()));

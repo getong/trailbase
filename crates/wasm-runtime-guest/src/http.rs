@@ -67,6 +67,7 @@ impl HttpRoute {
         move |context: HttpContext,
               req: http::Request<wstd::http::body::IncomingBody>,
               responder: Responder| {
+          println!("FOO 0");
           let (head, body) = req.into_parts();
           let Ok(url) = to_url(head.uri) else {
             return Box::pin(responder.respond(empty_error_response(StatusCode::BAD_REQUEST)));
@@ -84,9 +85,14 @@ impl HttpRoute {
             body,
           };
 
+          println!("FOO 1");
           return Box::pin(async move {
             #[allow(clippy::let_and_return)]
-            let response = responder.respond(f(req).await.into_response()).await;
+            println!("FOO 2");
+            let r = f(req).await.into_response();
+            println!("FOO 3");
+            let response = responder.respond(r).await;
+            println!("FOO 4");
 
             // TODO: Poll tasks.
 

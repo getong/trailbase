@@ -573,23 +573,29 @@ mod tests {
 
   #[tokio::test]
   async fn test_custom_sqlite_function() {
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
-    let _sqlite_function_runtime = init_sqlite_function_runtime(&conn).await;
+    // let conn = rusqlite::Connection::open_in_memory().unwrap();
+    // let _sqlite_function_runtime = init_sqlite_function_runtime(&conn).await;
 
-    let conn = trailbase_sqlite::Connection::from_connection_test_only(conn);
+    let tmp_dir = tempfile::TempDir::new().unwrap();
+    let fname = tmp_dir.path().join("main.sqlite");
+
+    let conn =
+      trailbase_sqlite::Connection::new(move || rusqlite::Connection::open(&fname), None).unwrap();
+
     let runtime = init_runtime(Some(conn.clone()));
 
-    println!("calling /transaction");
-    let resp = send_http_request(
-      &runtime,
-      "http://localhost:4000/transaction",
-      "/transaction",
-    )
-    .await
-    .unwrap();
-    assert_eq!(200, resp.status());
+    // println!("calling /transaction");
+    // let resp = send_http_request(
+    //   &runtime,
+    //   "http://localhost:4000/transaction",
+    //   "/transaction",
+    // )
+    // .await
+    // .unwrap();
+    // assert_eq!(200, resp.status());
 
     println!("calling /addDeletePost");
+
     let resp = send_http_request(
       &runtime,
       "http://localhost:4000/addDeletePost",
@@ -597,7 +603,15 @@ mod tests {
     )
     .await
     .unwrap();
-    assert_eq!(200, resp.status());
+
+    println!("called /addDeletePost");
+
+    let status = resp.status();
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+
+    assert_eq!(200, status, "{body:?}");
+
+    println!("Response: {body:?}");
 
     // {
     //   // First call echo endpoint

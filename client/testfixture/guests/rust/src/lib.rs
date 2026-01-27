@@ -60,13 +60,19 @@ impl Guest for Endpoints {
       }),
       // Test Database interactions
       routing::get("/addDeletePost", async |_req| {
-        let user_id = &query(
+        println!("/addDeletePost 0");
+        let rows = query(
           "SELECT id FROM _user WHERE email = 'admin@localhost'",
           vec![],
         )
         .await
-        .map_err(internal)?[0][0];
+        .map_err(internal)?;
 
+        let Some(user_id) = rows.get(0).and_then(|row| row.get(0)) else {
+          return Err(internal("missing value"));
+        };
+
+        println!("/addDeletePost 1");
         println!("[print from WASM guest] user id: {user_id:?}");
 
         let now = SystemTime::now();
@@ -76,6 +82,8 @@ impl Guest for Endpoints {
         )
         .await
         .unwrap();
+
+        println!("/addDeletePost 2");
 
         let num_deletions = execute(
           "DELETE FROM post WHERE body = ?1",

@@ -195,6 +195,8 @@ pub struct HttpIncomingHandler<T: Guest> {
 
 impl<T: Guest> HttpIncomingHandler<T> {
   async fn handle(request: Request<IncomingBody>, responder: Responder) -> Finished {
+    println!("HERE 0");
+
     let path = request.uri().path();
     let method = request.method();
 
@@ -216,7 +218,10 @@ impl<T: Guest> HttpIncomingHandler<T> {
           .into_iter()
           .find(|route| route.method == method && route.path == context.registered_path)
         {
-          return handler(context, request, responder).await;
+          println!("HERE 1");
+          let x = handler(context, request, responder).await;
+          println!("HERE 2");
+          return x;
         }
       }
       HttpContextKind::Job => {
